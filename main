@@ -1,0 +1,291 @@
+import sys
+import pyodbc
+from PyQt5 import QtWidgets, QtCore
+from photo_studio import Ui_Dialog
+
+
+class PhotoStudioDB(QtWidgets.QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.ui = Ui_Dialog()
+        self.ui.setupUi(self)
+
+        self.setWindowTitle("Автоматизированная система фотостудии - Работа с БД (Access)")
+
+        # Словарь для соответствия названий таблиц
+        self.tables = {
+            "Заказ": "Заказ",
+            "Залы": "Залы",
+            "Клиенты": "Клиенты",
+            "Оборудование": "Оборудование",
+            "Сотрудники": "Сотрудники",
+            "Услуги": "Услуги"
+        }
+
+        # Заполнение ComboBox
+        for ru_name in self.tables.keys():
+            self.ui.comboBox_tables.addItem(ru_name)
+
+        # Кнопки
+        self.ui.pushButton_load.clicked.connect(self.load_table)
+        self.ui.pushButton_add.clicked.connect(self.add_record)
+        self.ui.pushButton_edit.clicked.connect(self.edit_record)
+        self.ui.pushButton_delete.clicked.connect(self.delete_record)
+        self.ui.pushButton_refresh.clicked.connect(self.refresh_table)
+        self.ui.pushButton_search.clicked.connect(self.search_records)
+
+        self.statusBar().showMessage("Готов к работе. Выберите таблицу и нажмите 'Загрузить'.")
+
+        # Подключение
+        self.connect_to_db()
+
+        # Таблица
+        self.current_table_ru = None
+        self.current_table_en = None
+        self.current_columns = []
+
+        # Подключение к Access БД
+    def connect_to_db(self):
+        db_path = r"C:\Users\Andrew\PycharmProjects\case technology\database.accdb"
+
+        connection_string = (
+            r"DRIVER={Microsoft Access Driver (*.mdb, *.accdb)};"
+            f"DBQ={db_path};"
+            "ExtendedAnsiSQL=1;"
+        )
+
+        try:
+            self.conn = pyodbc.connect(connection_string)
+            self.cursor = self.conn.cursor()
+            self.statusBar().showMessage("Подключение к базе данных успешно!")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Ошибка подключения к БД",f"Не удалось подключиться к базе данных.\n\nПроверьте путь к файлу .accdb и наличие драйвера.\n\nОшибка: {str(e)}")
+            self.conn = None
+            self.cursor = None
+
+    def get_table_columns(self, table_name):
+        # Получение списка столбцов таблицы
+        try:
+            self.cursor.execute(f"SELECT TOP 1 * FROM [{table_name}]")
+            return [column[0] for column in self.cursor.description]
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Ошибка", f"Не удалось получить структуру таблицы: {str(e)}")
+            return []
+
+    def load_table(self):
+        #  Загрузка таблицы в TableWidget
+        if not self.conn:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Нет подключения к базе данных!")
+            return
+
+        self.current_table_ru = self.ui.comboBox_tables.currentText()
+        self.current_table_en = self.tables[self.current_table_ru]
+
+        try:
+            # Получение данных из таблицы
+            self.cursor.execute(f"SELECT * FROM [{self.current_table_en}]")
+            data = self.cursor.fetchall()
+
+            # Получение названий
+            self.current_columns = [column[0] for column in self.cursor.description]
+
+            self.ui.tableWidget_data.setRowCount(len(data))
+            self.ui.tableWidget_data.setColumnCount(len(self.current_columns))
+            self.ui.tableWidget_data.setHorizontalHeaderLabels(self.current_columns)
+
+            # Заполнение
+            for row, record in enumerate(data):
+                for col, value in enumerate(record):
+                    self.ui.tableWidget_data.setItem(row, col, QtWidgets.QTableWidgetItem(
+                        str(value) if value is not None else ""))
+
+            self.ui.tableWidget_data.resizeColumnsToContents()
+
+            self.statusBar().showMessage(f"Загружено {len(data)} записей из таблицы '{self.current_table_ru}'")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Ошибка загрузки", str(e))
+
+    def add_record(self):
+        #Добавление записи
+        if not self.conn or not self.current_table_en:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Сначала загрузите таблицу!")
+            return
+
+        data_columns = [col for col in self.current_columns if not self.is_autonumber_column(col)]
+        if not data_columns:
+            data_columns = self.current_columns[1:] if len(self.current_columns) > 1 else []
+
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Добавить запись в {self.current_table_ru}")
+        layout = QtWidgets.QFormLayout(dialog)
+
+        inputs = {}
+        for col in data_columns:
+            line_edit = QtWidgets.QLineEdit()
+            inputs[col] = line_edit
+            layout.addRow(f"{col}:", line_edit)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        layout.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        if dialog.exec_():
+            values = []
+            for col in data_columns:
+                val = inputs[col].text()
+                if val == "":
+                    values.append(None)
+                else:
+                    values.append(val)
+
+            placeholders = ','.join(['?' for _ in values])
+            query = f"INSERT INTO [{self.current_table_en}] ({','.join([f'[{col}]' for col in data_columns])}) VALUES ({placeholders})"
+
+            try:
+                self.cursor.execute(query, values)
+                self.conn.commit()
+                self.load_table()
+                self.statusBar().showMessage("Запись успешно добавлена!")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Ошибка БД", str(e))
+
+    def is_autonumber_column(self, column_name):
+        # Проверка на счётчик
+        try:
+            # Проверяем тип столбца (приблизительно)
+            self.cursor.execute(f"SELECT TOP 1 [{column_name}] FROM [{self.current_table_en}]")
+            return False
+        except:
+            return False
+
+    def edit_record(self):
+        if not self.conn or not self.current_table_en:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Сначала загрузите таблицу!")
+            return
+
+        current_row = self.ui.tableWidget_data.currentRow()
+        if current_row < 0:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Выберите запись для редактирования!")
+            return
+
+        primary_key = self.current_columns[0]
+        primary_value = self.ui.tableWidget_data.item(current_row, 0).text()
+
+        # Получение значений
+        current_values = {}
+        for col_idx, col_name in enumerate(self.current_columns):
+            item = self.ui.tableWidget_data.item(current_row, col_idx)
+            current_values[col_name] = item.text() if item else ""
+
+        # Редактирование
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle(f"Редактировать запись в {self.current_table_ru}")
+        layout = QtWidgets.QFormLayout(dialog)
+
+        inputs = {}
+        for col in self.current_columns:
+            line_edit = QtWidgets.QLineEdit()
+            line_edit.setText(current_values[col])
+            inputs[col] = line_edit
+            layout.addRow(f"{col}:", line_edit)
+
+        buttons = QtWidgets.QDialogButtonBox(QtWidgets.QDialogButtonBox.Ok | QtWidgets.QDialogButtonBox.Cancel)
+        layout.addRow(buttons)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+
+        if dialog.exec_():
+            set_clause = ','.join([f"[{col}]=?" for col in self.current_columns])
+            values = [inputs[col].text() for col in self.current_columns]
+            values.append(primary_value)
+
+            query = f"UPDATE [{self.current_table_en}] SET {set_clause} WHERE [{primary_key}]=?"
+
+            try:
+                self.cursor.execute(query, values)
+                self.conn.commit()
+                self.load_table()
+                self.statusBar().showMessage("Запись успешно обновлена!")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Ошибка БД", str(e))
+
+    def delete_record(self):
+        #Удаление записи
+        if not self.conn or not self.current_table_en:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Сначала загрузите таблицу!")
+            return
+
+        current_row = self.ui.tableWidget_data.currentRow()
+        if current_row < 0:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Выберите запись для удаления!")
+            return
+
+        primary_key = self.current_columns[0]
+        primary_value = self.ui.tableWidget_data.item(current_row, 0).text()
+
+        reply = QtWidgets.QMessageBox.question(self, "Подтверждение",
+                                               f"Удалить запись с {primary_key}={primary_value}?",
+                                               QtWidgets.QMessageBox.Yes | QtWidgets.QMessageBox.No)
+
+        if reply == QtWidgets.QMessageBox.Yes:
+            try:
+                self.cursor.execute(f"DELETE FROM [{self.current_table_en}] WHERE [{primary_key}]=?", (primary_value,))
+                self.conn.commit()
+                self.load_table()
+                self.statusBar().showMessage("Запись успешно удалена!")
+            except Exception as e:
+                QtWidgets.QMessageBox.critical(self, "Ошибка БД", str(e))
+
+    def refresh_table(self):
+        # Обновление записи
+        if self.current_table_en:
+            self.load_table()
+        else:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Нет загруженной таблицы!")
+
+    def search_records(self):
+        # Поиск по таблице
+        if not self.conn or not self.current_table_en:
+            QtWidgets.QMessageBox.warning(self, "Ошибка", "Сначала загрузите таблицу!")
+            return
+
+        search_text = self.ui.lineEdit_search.text()
+        if not search_text:
+            self.load_table()
+            return
+
+        conditions = []
+        for col in self.current_columns:
+            conditions.append(f"CAST([{col}] AS TEXT) LIKE ?")
+
+        where_clause = " OR ".join(conditions)
+        search_pattern = f"%{search_text}%"
+        params = [search_pattern] * len(self.current_columns)
+
+        try:
+            self.cursor.execute(f"SELECT * FROM [{self.current_table_en}] WHERE {where_clause}", params)
+            data = self.cursor.fetchall()
+
+            self.ui.tableWidget_data.setRowCount(len(data))
+            for row, record in enumerate(data):
+                for col, value in enumerate(record):
+                    self.ui.tableWidget_data.setItem(row, col, QtWidgets.QTableWidgetItem(
+                        str(value) if value is not None else ""))
+
+            self.statusBar().showMessage(f"Найдено {len(data)} записей по запросу '{search_text}'")
+        except Exception as e:
+            QtWidgets.QMessageBox.critical(self, "Ошибка поиска", str(e))
+
+    def closeEvent(self, event):
+        # Закрытие БД
+        if hasattr(self, 'conn') and self.conn:
+            self.conn.close()
+        event.accept()
+
+
+if __name__ == "__main__":
+    app = QtWidgets.QApplication(sys.argv)
+    window = PhotoStudioDB()
+    window.show()
+    sys.exit(app.exec_())
